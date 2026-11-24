@@ -103,6 +103,17 @@ async function server(t, handler) {
     return { baseUrl: `http://127.0.0.1:${instance.address().port}/v1`, model: "test-qwen" };
 }
 
+test("HTTPS can recover a standalone list of three to five text titles from a small model", () => {
+    const reply = content => JSON.stringify({choices:[{message:{content}}]});
+    const list = "- Trasa\r\n- Nocleg\r\n- Sprzęt";
+    assert.deepEqual(readSuggestions(reply(list),["Trasa"],true),["Nocleg","Sprzęt"]);
+    assert.throws(() => readSuggestions(reply(list),[]));
+    for (const bad of ["Wstęp\n"+list, list+"\nUwagi", "- A\n- B", list+"\n- D\n- E\n- F",
+        "- A\n- B\n- ![[dokument]]", "- A\n- B\n- <img src=x>"]) {
+        assert.throws(() => readSuggestions(reply(bad),[],true));
+    }
+});
+
 test("one POST sends exactly the explicitly selected text and reads three alternatives", async t => {
     const requests = [];
     const local = await server(t, async (req,res) => {

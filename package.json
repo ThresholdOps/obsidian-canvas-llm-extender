@@ -1,6 +1,6 @@
 {
 	"name": "canvas-qwen-branches",
-	"version": "0.6.0",
+	"version": "0.6.1",
 	"description": "Expand native Canvas mind maps with Qwen locally or on an OpenAI-compatible HTTPS server.",
 	"main": "main.js",
 	"scripts": {
