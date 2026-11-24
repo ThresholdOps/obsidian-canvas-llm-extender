@@ -4,7 +4,7 @@ import { localEndpoint, serverEndpoint, testChat } from "./local-qwen";
 import type { QwenSettings } from "./local-qwen";
 
 export const defaultSettings: QwenSettings = {
-    baseUrl: "http://127.0.0.1:11434/v1", model: "", mode: "local", credential: null,
+    baseUrl: "http://127.0.0.1:11434/v1", model: "", mode: "local", streamBranches: false, credential: null,
 };
 
 export class QwenSettingsTab extends PluginSettingTab {
@@ -93,7 +93,13 @@ export class QwenSettingsTab extends PluginSettingTab {
             field.inputEl.addEventListener("change", () => updateAddress(field.getValue(), true));
         });
         updateAddress(settings.baseUrl, false);
-        if (server) this.addChatTest();
+        if (server) {
+            new Setting(this.containerEl).setName("Odbiór propozycji")
+                .addDropdown(field => field.addOption("full", "Cała odpowiedź").addOption("stream", "Strumieniowo (SSE)")
+                    .setValue(settings.streamBranches ? "stream" : "full")
+                    .onChange(value => this.plugin.updateSettings({ streamBranches: value === "stream" })));
+            this.addChatTest();
+        }
     }
 
     private addChatTest(): void {

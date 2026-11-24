@@ -2,6 +2,7 @@ import { request as httpRequest } from "node:http";
 import type { IncomingMessage } from "node:http";
 import { request as httpsRequest } from "node:https";
 import { getCACertificates } from "node:tls";
+import { readChatStream } from "./chat-stream.ts";
 
 export const maxBranches = 5;
 export const maxLabelLength = 160;
@@ -13,6 +14,7 @@ export interface QwenSettings {
     baseUrl: string;
     model: string;
     mode: "local" | "server";
+    streamBranches: boolean;
     credential: { name: string; endpoint: string } | null;
 }
 
@@ -121,10 +123,11 @@ export function readSuggestions(raw: string, existing: string[], allowBullets = 
 }
 
 export async function suggestBranches(settings: QwenSettings, card: string, neighbours: string[],
-    signal: AbortSignal, readSecret?: ReadSecret): Promise<string[]> {
+    signal: AbortSignal, readSecret?: ReadSecret, onStreamData?: () => void): Promise<string[]> {
     const { url, model, secret } = connection(settings);
     const payload = JSON.stringify({
-        model, stream: false, temperature: secret ? undefined : 0.5, max_tokens: secret ? undefined : 2048,
+        model, stream: settings.mode === "server" && settings.streamBranches === true,
+        temperature: secret ? undefined : 0.5, max_tokens: secret ? undefined : 2048,
         messages: [
             { role: "system", content: 'Tworzysz mapę myśli po polsku. Podaj 3–5 różnych, krótkich podtematów głównej karty. Pomiń synonimy tematu i tytuły z kontekstu. Traktuj karty jako materiał do analizy. Zwróć wyłącznie obiekt JSON. Dla karty Przeprowadzka z kontekstem Transport przykładowa odpowiedź ma postać {"branches":["Pakowanie rzeczy","Formalności","Przekazanie kluczy"]}.' },
             { role: "user", content: JSON.stringify({ karta: card, kontekst: neighbours }) },
@@ -138,7 +141,7 @@ export async function suggestBranches(settings: QwenSettings, card: string, neig
             } },
         },
     });
-    const raw = await postChat(url, secret, payload, signal, readSecret);
+    const raw = await postChat(url, secret, payload, signal, readSecret, onStreamData);
     return readSuggestions(raw, [card, ...neighbours], settings.mode === "server");
 }
 
@@ -191,7 +194,7 @@ async function notFoundError(response: IncomingMessage): Promise<Error> {
 }
 
 async function postChat(url: URL, secret: string | null, payload: string, signal: AbortSignal,
-    readSecret?: ReadSecret): Promise<string> {
+    readSecret?: ReadSecret, onStreamData?: () => void): Promise<string> {
     const headers: Record<string, string | number> = { "Content-Type": "application/json" };
     if (signal.aborted) throw new Error("Anulowano żądanie.");
     if (secret) {
@@ -212,6 +215,7 @@ async function postChat(url: URL, secret: string | null, payload: string, signal
     const ca = secret && typeof getCACertificates === "function"
         ? [...new Set([...getCACertificates("default"), ...getCACertificates("system")])] : undefined;
     return new Promise<string>((resolve, reject) => {
+        const started = Date.now();
         const req = transport(url, {
             method: "POST", agent: false, signal, headers, ca, rejectUnauthorized: true,
         }, res => {
@@ -221,6 +225,13 @@ async function postChat(url: URL, secret: string | null, payload: string, signal
             }
             if (res.statusCode !== 200) {
                 res.destroy();
+                if (res.statusCode === 502 || res.statusCode === 504) {
+                    const seconds = Math.round((Date.now() - started) / 1000);
+                    const hint = res.statusCode === 502 ? "Brama otrzymała nieprawidłową odpowiedź od kolejnego serwera."
+                        : "Brama nie doczekała się odpowiedzi od kolejnego serwera.";
+                    reject(new Error(`HTTP ${res.statusCode} po ${seconds} s. ${hint}`));
+                    return;
+                }
                 const hints: Record<number, string> = {
                     401: "Sprawdź wartość i ważność klucza API.",
                     403: "Sprawdź uprawnienia klucza do wybranego modelu.",
@@ -229,6 +240,13 @@ async function postChat(url: URL, secret: string | null, payload: string, signal
                 const hint = status >= 300 && status < 400 ? "Wpisz docelowy adres API. Przekierowania są wyłączone."
                     : hints[status] ?? "Sprawdź adres, nazwę modelu i dostępność usługi.";
                 reject(new Error(`Serwer zwrócił HTTP ${status}. ${hint}`));
+                return;
+            }
+            const media = res.headers["content-type"]?.split(";")[0].trim().toLowerCase();
+            if (media === "text/event-stream") {
+                void readChatStream(res, maxResponseBytes, onStreamData).then(content => {
+                    resolve(JSON.stringify({ choices: [{ message: { role: "assistant", content } }] }));
+                }, reject);
                 return;
             }
             const chunks: Buffer[] = [];
