@@ -1,13 +1,15 @@
 {
-	"name": "obsidian-canvas-llm-extender",
-	"version": "0.4",
-	"description": "Let the OpenAI LLM add nodes to your canvas.",
+	"name": "canvas-qwen-branches",
+	"version": "0.5.0",
+	"description": "Expand native Canvas mind maps with a local Qwen model.",
 	"main": "main.js",
 	"scripts": {
-		"lint": "eslint . --ext .ts",
+		"lint": "eslint src",
 		"dev": "node esbuild.config.mjs",
 		"build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production",
-		"version": "npx ts-node --esm external/obsidian-plugin-scripts/version-bump.mts && git add package.json package-lock.json manifest.json versions.json"
+		"version": "npx ts-node --esm external/obsidian-plugin-scripts/version-bump.mts && git add package.json package-lock.json manifest.json versions.json",
+		"pretest": "npm run build",
+		"test": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --test tests/*.test.mjs"
 	},
 	"keywords": [
 		"obsidian-plugin",
@@ -21,11 +23,12 @@
 		"@typescript-eslint/parser": "8.53.0",
 		"builtin-modules": "5.0.0",
 		"esbuild": "^0.27.2",
+		"eslint": "^9.39.2",
+		"linkedom": "^0.18.12",
 		"tslib": "2.8.1",
 		"typescript": "^5.9.3"
 	},
 	"dependencies": {
-		"obsidian": "^1.11.4",
-		"openai": "^6.16.0"
+		"obsidian": "^1.11.4"
 	}
 }
