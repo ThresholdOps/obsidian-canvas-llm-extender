@@ -16,7 +16,7 @@ hooks.deregister();
 const root = { id:"root", type:"text", text:"Planowanie wycieczki w góry", x:0, y:0, width:280, height:120 };
 const button = prefix => [...document.querySelectorAll("button")].find(el => el.textContent.startsWith(prefix));
 
-async function dialog(t, settings, withNeighbours = false) {
+async function dialog(t, settings, withNeighbours = false, secretStorage) {
     let graph = { nodes:[{ ...root }], edges:[] };
     if (withNeighbours) {
         for (const [id, text] of [["yes", "Trasa kolejowa"], ["no", "Prywatna notatka testowa"]]) {
@@ -31,7 +31,7 @@ async function dialog(t, settings, withNeighbours = false) {
         on(event, fn) { assert.equal(event,"canvas:node-menu"); menuEvent = fn; },
         getLeavesOfType:() => [{ view:{ canvas } }],
     };
-    const plugin = new Plugin({ settings, workspace });
+    const plugin = new Plugin({ settings, workspace, secretStorage });
     await plugin.onload();
     t.after(() => plugin.onunload());
     const item = { setTitle() { return this; }, setIcon() { return this; }, onClick(fn) { this.click = fn; return this; } };
@@ -107,8 +107,14 @@ test("an unavailable local server leaves the map alone and enables retry", async
 });
 
 if (process.env.CANVAS_QWEN_TEST_MODEL) {
-    test("plugin bundle expands a single card with a real local model", async t => {
-        const ui = await dialog(t, {baseUrl:process.env.CANVAS_QWEN_TEST_URL,model:process.env.CANVAS_QWEN_TEST_MODEL});
+    const model = process.env.CANVAS_QWEN_TEST_MODEL;
+    const connections = [{name:"loopback", settings:{baseUrl:process.env.CANVAS_QWEN_TEST_URL, model}}];
+    const gateway = process.env.CANVAS_QWEN_TEST_HTTPS_URL;
+    if (gateway) connections.push({name:"authenticated HTTPS", settings:{
+        mode:"server",baseUrl:gateway,model,credential:{name:"integration",endpoint:gateway+"/chat/completions"},
+    }});
+    for (const {name,settings} of connections) test(`plugin bundle expands a single card with a real model over ${name}`, async t => {
+        const ui = await dialog(t,settings,false,{ getSecret:id => id==="integration" ? process.env.CANVAS_QWEN_TEST_BEARER : null });
         await button("Zaproponuj").onclick();
         assert.ok(button("Dodaj wybrane"), document.querySelector('[role="status"]')?.textContent);
         assert.equal(ui.saves(),0);
@@ -118,3 +124,56 @@ if (process.env.CANVAS_QWEN_TEST_MODEL) {
         assert.equal(ui.graph().edges.length,2);
     });
 }
+
+test("upgrading a configured server keeps it opt-in and stores only the selected secret name and destination", async () => {
+    let reads = 0;
+    const app = {
+        workspace: {on(){}},
+        settings: {baseUrl:"https://example.org/gateway/v1",model:"my-qwen"},
+        secretStorage: {getSecret(){ reads++; return "test-only-raw-value"; }},
+    };
+    const plugin = new Plugin(app);
+    await plugin.onload();
+    assert.equal(plugin.settings.mode,"local");
+    assert.equal(plugin.settings.model,"my-qwen");
+    const tab = app.settingsTab;
+    tab.display();
+    const pane = tab.containerEl;
+    assert.equal(pane.querySelector('[aria-label="secret name"]'),null);
+    const select = pane.querySelector("select");
+    select.querySelector('option[value="local"]').selected=false;
+    select.querySelector('option[value="server"]').selected=true;
+    await select.onchange();
+    assert.match(pane.textContent,/gateway\/v1\/chat\/completions/);
+    const pick = pane.querySelector('[aria-label="secret name"]');
+    pick.value="qwen-test";
+    await pick.onchange();
+    assert.deepEqual(app.saved.credential,{name:"qwen-test",endpoint:"https://example.org/gateway/v1/chat/completions"});
+    assert.equal(JSON.stringify(app.saved).includes("test-only-raw-value"),false);
+    const address = [...pane.querySelectorAll('input')].find(el=>el.value===app.settings.baseUrl);
+    const change = () => address.dispatchEvent(new address.ownerDocument.defaultView.Event("change"));
+    address.value="https://other.example.org/v1";
+    change();
+    assert.equal(plugin.settings.credential,null);
+    await pick.onchange();
+    assert.equal(plugin.settings.credential,null);
+    address.value="https://other.example.org/v1?key=test-only-raw-value";
+    change();
+    await plugin.updateSettings({model:"my-qwen"});
+    assert.equal(app.saved.baseUrl,"");
+    assert.equal(JSON.stringify(app.saved).includes("test-only-raw-value"),false);
+    assert.equal(reads,0);
+});
+
+test("a missing server token fails on Generate before any request and leaves the map alone", async t => {
+    const baseUrl="https://qwen.example.org/v1";
+    const lookups=[];
+    const remote={baseUrl,mode:"server",model:"example",credential:{name:"qwen-token",endpoint:baseUrl+"/chat/completions"}};
+    const ui=await dialog(t,remote,false,{getSecret(name){lookups.push(name); return null;}});
+    assert.deepEqual(lookups,[]);
+    assert.match(document.body.textContent,/https:\/\/qwen\.example\.org\/v1\/chat\/completions/);
+    await button("Zaproponuj").onclick();
+    assert.deepEqual(lookups,["qwen-token"]);
+    assert.match(document.querySelector('[role="status"]').textContent,/magazynie sekretów/);
+    assert.equal(ui.saves(),0);
+});

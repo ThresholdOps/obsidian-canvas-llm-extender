@@ -7,12 +7,16 @@ import { defaultSettings, QwenSettingsTab } from "./settings";
 export default class CanvasQwenPlugin extends Plugin {
     settings: QwenSettings = { ...defaultSettings };
     private modal?: BranchModal;
+    private pendingSave = Promise.resolve();
 
     async onload(): Promise<void> {
         const data = await this.loadData();
         this.settings = {
             baseUrl: typeof data?.baseUrl === "string" ? data.baseUrl : defaultSettings.baseUrl,
             model: typeof data?.model === "string" ? data.model : defaultSettings.model,
+            mode: data?.mode === "server" ? "server" : "local",
+            credential: typeof data?.credential?.name === "string" && typeof data.credential.endpoint === "string"
+                ? { name: data.credential.name, endpoint: data.credential.endpoint } : null,
         };
         this.addSettingTab(new QwenSettingsTab(this.app, this));
         this.registerEvent(this.app.workspace.on("canvas:node-menu", (menu, node: unknown) => {
@@ -22,9 +26,14 @@ export default class CanvasQwenPlugin extends Plugin {
         }));
     }
 
-    async updateSettings(changes: Partial<QwenSettings>): Promise<void> {
+    updateSettings(changes: Partial<QwenSettings>): Promise<void> {
+        this.modal?.close();
         this.settings = { ...this.settings, ...changes };
-        await this.saveData(this.settings);
+        const snapshot = this.settings;
+        this.pendingSave = this.pendingSave.then(() => this.saveData(snapshot)).catch(() => {
+            new Notice("Nie udało się zapisać ustawień Canvas Qwen w tym sejfie.");
+        });
+        return this.pendingSave;
     }
 
     private openBranches(node: unknown): void {
