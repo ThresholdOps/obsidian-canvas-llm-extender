@@ -1,6 +1,6 @@
 import { App, Modal, Setting } from "obsidian";
 import type { CanvasTextData } from "obsidian/canvas";
-import { localEndpoint, maxLabelLength, suggestBranches, validateLabels, validateModel } from "./local-qwen";
+import { connection, maxLabelLength, suggestBranches, validateLabels } from "./local-qwen";
 import type { QwenSettings } from "./local-qwen";
 
 export class BranchModal extends Modal {
@@ -36,11 +36,12 @@ export class BranchModal extends Modal {
                 label.createEl("span", { text: card.text, cls: "canvas-qwen-card" });
             }
         }
+        const destination = pane.createDiv({ cls: "canvas-qwen-destination" });
         const status = pane.createDiv({ attr: { role: "status", "aria-live": "polite" } });
         let ready = true;
         try {
-            const endpoint = localEndpoint(this.settings.baseUrl);
-            status.setText(`${validateModel(this.settings.model)} · ${endpoint.origin}`);
+            const target = connection(this.settings);
+            destination.setText(`${target.model} · ${target.url.href}`);
         } catch (error) {
             status.setText((error as Error).message);
             ready = false;
@@ -54,7 +55,8 @@ export class BranchModal extends Modal {
                 checks.forEach(check => { check.disabled = true; });
                 status.setText("Qwen przygotowuje propozycje…");
                 try {
-                    const labels = await suggestBranches(this.settings, this.card.text, context, this.controller.signal);
+                    const labels = await suggestBranches(this.settings, this.card.text, context, this.controller.signal,
+                        name => this.app.secretStorage.getSecret(name));
                     if (!this.controller.signal.aborted) this.drawSuggestions(labels);
                 } catch (error) {
                     if (this.controller.signal.aborted) return;

@@ -22,3 +22,8 @@
     color: var(--text-muted);
     margin-block: var(--size-4-3);
 }
+
+.canvas-qwen-destination {
+    overflow-wrap: anywhere;
+    color: var(--text-muted);
+}

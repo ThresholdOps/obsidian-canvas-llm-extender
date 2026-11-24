@@ -28,6 +28,29 @@ class Modal {
 }
 class Setting {
     constructor(pane) { this.el = pane.createDiv(); }
+    setName(name) { this.el.createEl("span", {text:name}); return this; }
+    setDesc(desc) { this.el.createEl("span", {text:desc}); return this; }
+    addText(configure) {
+        const el = this.el.createEl("input", {type:"text"});
+        configure({
+            inputEl:el,
+            setPlaceholder(value) { el.placeholder=value; return this; },
+            setValue(value) { el.value=value; return this; },
+            getValue() { return el.value; },
+            onChange(fn) { el.oninput=() => fn(el.value); return this; },
+        });
+        return this;
+    }
+    addDropdown(configure) {
+        const el = this.el.createEl("select");
+        configure({
+            addOption(value,text) { el.createEl("option",{text,attr:{value}}); return this; },
+            setValue(value) { el.querySelector(`option[value="${value}"]`).selected=true; return this; },
+            onChange(fn) { el.onchange=() => fn(el.value); return this; },
+        });
+        return this;
+    }
+    addComponent(configure) { configure(this.el); return this; }
     addButton(configure) {
         const el = this.el.createEl("button");
         const button = {
@@ -44,6 +67,15 @@ class Plugin {
     constructor(app) { this.app = app; }
     async loadData() { return this.app.settings; }
     registerEvent() {}
-    addSettingTab() {}
+    addSettingTab(tab) { this.app.settingsTab=tab; }
+    async saveData(data) { this.app.saved=structuredClone(data); }
 }
-module.exports = { document, Modal, Setting, Plugin, PluginSettingTab: class {}, Notice: class {} };
+class SecretComponent {
+    constructor(app,el) { this.input = el.createEl("input",{attr:{"aria-label":"secret name"}}); }
+    setValue(value) { this.input.value=value; return this; }
+    onChange(fn) { this.input.onchange=() => fn(this.input.value); return this; }
+}
+class PluginSettingTab {
+    constructor(app) { this.app=app; this.containerEl=document.createElement("div"); }
+}
+module.exports = { document, Modal, Setting, Plugin, SecretComponent, PluginSettingTab, Notice: class {} };

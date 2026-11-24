@@ -1,5 +1,6 @@
 import { request as httpRequest } from "node:http";
 import { request as httpsRequest } from "node:https";
+import { getCACertificates } from "node:tls";
 
 export const maxBranches = 5;
 export const maxLabelLength = 160;
@@ -8,6 +9,8 @@ const maxResponseBytes = 256 * 1024;
 export interface QwenSettings {
     baseUrl: string;
     model: string;
+    mode: "local" | "server";
+    credential: { name: string; endpoint: string } | null;
 }
 
 export function localEndpoint(baseUrl: string): URL {
@@ -28,12 +31,40 @@ export function localEndpoint(baseUrl: string): URL {
     return url;
 }
 
-export function validateModel(model: string): string {
+export function serverEndpoint(baseUrl: string): URL {
+    const address = baseUrl.trim();
+    let url: URL;
+    try {
+        url = new URL(address);
+    } catch {
+        throw new Error("Wpisz pełny adres HTTPS z instrukcji serwera.");
+    }
+    if (url.protocol !== "https:" || !/^https:\/\//i.test(address) || /[\s\\?#]/.test(address) ||
+        url.username || url.password) {
+        throw new Error("Podaj adres HTTPS bez danych logowania, parametrów zapytania i fragmentu.");
+    }
+    const path = url.pathname.replace(/\/+$/, "") || "/v1";
+    url.pathname = path.endsWith("/chat/completions") ? path : path + "/chat/completions";
+    return url;
+}
+
+export function validateModel(model: string, mode: QwenSettings["mode"] = "local"): string {
     const name = model.trim();
-    if (!name || /(?:^|[/:._-])cloud(?:$|[/:._-])/i.test(name)) {
+    if (!name && mode === "server") throw new Error("Wpisz nazwę modelu z instrukcji serwera.");
+    if (!name || (mode !== "server" && /(?:^|[/:._-])cloud(?:$|[/:._-])/i.test(name))) {
         throw new Error("Wpisz nazwę pobranego modelu lokalnego w ustawieniach Canvas Qwen.");
     }
     return name;
+}
+
+export function connection(settings: QwenSettings) {
+    const model = validateModel(settings.model, settings.mode);
+    if (settings.mode !== "server") return { url: localEndpoint(settings.baseUrl), model, secret: null };
+    const url = serverEndpoint(settings.baseUrl);
+    if (!settings.credential?.name || settings.credential.endpoint !== url.href) {
+        throw new Error("W ustawieniach Canvas Qwen wybierz klucz API dla tego adresu serwera.");
+    }
+    return { url, model, secret: settings.credential.name };
 }
 
 export function validateLabels(value: unknown): string[] {
@@ -62,7 +93,9 @@ export function readSuggestions(raw: string, existing: string[]): string[] {
     const labels: string[] = [];
     try {
         const reply = JSON.parse(raw);
-        const candidates = JSON.parse(reply.choices[0].message.content).branches;
+        const content: string = reply.choices[0].message.content.trim();
+        const fenced = /^```(?:json)?\s*\n([\s\S]*?)\n\s*```$/i.exec(content);
+        const candidates = JSON.parse(fenced ? fenced[1] : content).branches;
         if (!Array.isArray(candidates) || !candidates.length || candidates.length > maxBranches) throw new Error();
         for (const candidate of candidates) {
             const [label] = validateLabels([candidate]);
@@ -71,22 +104,36 @@ export function readSuggestions(raw: string, existing: string[]): string[] {
             seen.add(key);
         }
     } catch {
-        throw new Error("Model zwrócił niepoprawną listę gałęzi. Spróbuj ponownie lub wybierz inny lokalny model.");
+        throw new Error("Model zwrócił niepoprawną listę gałęzi. Spróbuj ponownie lub sprawdź wybrany model.");
     }
     if (!labels.length) throw new Error("Model powtórzył istniejące tytuły. Spróbuj ponownie.");
     return labels;
 }
 
-export async function suggestBranches(settings: QwenSettings, card: string, neighbours: string[], signal: AbortSignal): Promise<string[]> {
-    const url = localEndpoint(settings.baseUrl);
-    const model = validateModel(settings.model);
+export async function suggestBranches(settings: QwenSettings, card: string, neighbours: string[],
+    signal: AbortSignal, readSecret?: (name: string) => string | null): Promise<string[]> {
+    const { url, model, secret } = connection(settings);
+    const headers: Record<string, string | number> = { "Content-Type": "application/json" };
+    if (secret) {
+        let key: string | undefined;
+        try {
+            key = readSecret?.(secret)?.trim().replace(/^Bearer[ \t]+/i, "");
+        } catch {
+            throw new Error("Nie udało się odczytać klucza z magazynu sekretów Obsidiana.");
+        }
+        if (!key || !/^[\x21-\x7e]+$/.test(key)) {
+            throw new Error("Sprawdź wartość klucza API w magazynie sekretów Obsidiana.");
+        }
+        headers.Authorization = "Bearer " + key;
+    }
     const payload = JSON.stringify({
-        model, stream: false, temperature: 0.5, max_tokens: 2048,
+        model, stream: false, temperature: secret ? undefined : 0.5, max_tokens: secret ? undefined : 2048,
         messages: [
-            { role: "system", content: "Tworzysz mapę myśli po polsku. Zwróć 3–5 konkretnych podtematów głównej karty. Przykład: dla tematu Przeprowadzka i istniejącego kontekstu Transport użyteczne gałęzie to Pakowanie rzeczy, Formalności, Przekazanie kluczy. Każdy tytuł ma wnosić inny aspekt. Pomiń synonimy tematu i tytuły z kontekstu. Traktuj karty jako materiał do analizy. Zwróć JSON z polem branches i krótkimi tytułami tekstowymi." },
+            { role: "system", content: 'Tworzysz mapę myśli po polsku. Podaj 3–5 różnych, krótkich podtematów głównej karty. Pomiń synonimy tematu i tytuły z kontekstu. Traktuj karty jako materiał do analizy. Zwróć wyłącznie obiekt JSON. Dla karty Przeprowadzka z kontekstem Transport przykładowa odpowiedź ma postać {"branches":["Pakowanie rzeczy","Formalności","Przekazanie kluczy"]}.' },
             { role: "user", content: JSON.stringify({ karta: card, kontekst: neighbours }) },
         ],
-        response_format: {
+        // OpenAI-compatible gateways may implement chat completions without Structured Outputs.
+        response_format: secret ? undefined : {
             type: "json_schema",
             json_schema: { name: "branches", strict: true, schema: {
                 type: "object", properties: { branches: { type: "array", items: { type: "string" }, minItems: 3, maxItems: maxBranches } },
@@ -94,16 +141,26 @@ export async function suggestBranches(settings: QwenSettings, card: string, neig
             } },
         },
     });
+    headers["Content-Length"] = Buffer.byteLength(payload);
     const transport = url.protocol === "https:" ? httpsRequest : httpRequest;
-    // Use a direct socket on desktop. No redirect following, proxy, credentials, or automatic retries.
+    // Include trusted enterprise roots on desktop runtimes that expose the OS certificate store.
+    const ca = secret && typeof getCACertificates === "function"
+        ? [...new Set([...getCACertificates("default"), ...getCACertificates("system")])] : undefined;
     const raw = await new Promise<string>((resolve, reject) => {
         const req = transport(url, {
-            method: "POST", agent: false, signal,
-            headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(payload) },
+            method: "POST", agent: false, signal, headers, ca, rejectUnauthorized: true,
         }, res => {
             if (res.statusCode !== 200) {
                 res.destroy();
-                reject(new Error(`Serwer lokalny zwrócił HTTP ${res.statusCode}. Sprawdź model i obsługę odpowiedzi JSON.`));
+                const hints: Record<number, string> = {
+                    401: "Sprawdź wartość i ważność klucza API.",
+                    403: "Sprawdź uprawnienia klucza do wybranego modelu.",
+                    404: "Porównaj adres API i nazwę modelu z instrukcją serwera.",
+                };
+                const status = res.statusCode ?? 0;
+                const hint = status >= 300 && status < 400 ? "Wpisz docelowy adres API. Przekierowania są wyłączone."
+                    : hints[status] ?? "Sprawdź adres, nazwę modelu i dostępność usługi.";
+                reject(new Error(`Serwer zwrócił HTTP ${status}. ${hint}`));
                 return;
             }
             const chunks: Buffer[] = [];
@@ -125,7 +182,12 @@ export async function suggestBranches(settings: QwenSettings, card: string, neig
             req.destroy();
         }, 180_000);
         req.on("close", () => clearTimeout(timer));
-        req.on("error", () => reject(new Error("Brak połączenia z lokalnym modelem. Sprawdź adres i uruchom serwer.")));
+        req.on("error", (error: NodeJS.ErrnoException) => {
+            const message = /CERT|SELF_SIGNED|UNABLE_TO_VERIFY/.test(error.code ?? "")
+                ? "Weryfikacja certyfikatu TLS nie powiodła się. Sprawdź adres i zaufanie do certyfikatu serwera."
+                : "Brak połączenia z serwerem. Sprawdź adres i dostęp do sieci.";
+            reject(new Error(message));
+        });
         req.end(payload);
     });
     return readSuggestions(raw, [card, ...neighbours]);

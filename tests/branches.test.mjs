@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { once } from "node:events";
 import { adjacentTextCards, appendBranches } from "../src/obsidian-canvas-utils.ts";
-import { localEndpoint, readSuggestions, suggestBranches, validateLabels, validateModel } from "../src/local-qwen.ts";
+import { connection, localEndpoint, readSuggestions, serverEndpoint, suggestBranches, validateLabels, validateModel } from "../src/local-qwen.ts";
 
 const root = { id: "topic", type: "text", text: "Wycieczka", x: 0, y: 0, width: 300, height: 120 };
 const first = { nodes: [root], edges: [], extra: { preserve: true } };
@@ -55,10 +55,44 @@ test("branch labels are validated before changing the map", () => {
     }
 });
 
+test("a supplied API base, path prefix and full chat URL resolve to one intended destination", () => {
+    const host = "https://qwen.example.org:8443";
+    for (const [input, path] of [
+        [host, "/v1/chat/completions"], [host + "/v1/", "/v1/chat/completions"],
+        [host + "/gateway/api/v1", "/gateway/api/v1/chat/completions"],
+        [host + "/gateway/chat/completions/", "/gateway/chat/completions"],
+    ]) assert.equal(serverEndpoint(input).href, host + path);
+    for (const value of ["", "http://qwen.example.org", "https:example.org", "file:///etc", host + "/?key=x",
+        "https://user:password@example.org", host + "#fragment", host + "/path with spaces"]) {
+        assert.throws(() => serverEndpoint(value));
+    }
+});
+
+test("a server needs an explicit mode and a secret bound to the exact chat endpoint", async () => {
+    const baseUrl = "https://qwen.example.org/v1";
+    const credential = {name:"test-entry", endpoint:serverEndpoint(baseUrl).href};
+    const settings = {mode:"server", baseUrl, model:"example:model", credential};
+    assert.equal(connection(settings).secret, credential.name);
+    assert.throws(() => connection({...settings,mode:"local"}));
+    assert.throws(() => connection({baseUrl,model:settings.model}));
+    assert.throws(() => connection({...settings,model:" "}));
+    for (const address of ["https://other.example.org/v1", "https://qwen.example.org:8443/v1", "https://qwen.example.org/other/v1"]) {
+        let reads = 0;
+        await assert.rejects(suggestBranches({...settings,baseUrl:address},"card",[],new AbortController().signal,() => { reads++; }));
+        assert.equal(reads,0);
+    }
+    for (const missing of [null, "", "two words", "part\npart"]) {
+        await assert.rejects(suggestBranches(settings,"card",[],new AbortController().signal,() => missing), /klucza API/);
+    }
+    assert.equal(connection({...settings,mode:"local",baseUrl:"http://localhost:11434"}).secret,null);
+});
+
 test("a small model repeating a source or a suggestion keeps the other suggestions usable", () => {
     const reply = labels => JSON.stringify({ choices: [{ message: { content: JSON.stringify({ branches: labels }) } }] });
     assert.deepEqual(readSuggestions(reply([" WYCIECZKA ", "Trasa", "Nocleg", "nocleg", "Bagaż"]), ["Wycieczka", "Trasa"]), ["Nocleg", "Bagaż"]);
     assert.throws(() => readSuggestions(reply(["Trasa"]), ["trasa"]), /powtórzył/);
+    const fenced = JSON.stringify({ choices: [{ message: { content: '\x60\x60\x60json\n{"branches":["Nowy temat"]}\n\x60\x60\x60' } }] });
+    assert.deepEqual(readSuggestions(fenced,[]),["Nowy temat"]);
 });
 
 async function server(t, handler) {
