@@ -9,6 +9,8 @@ Polska wtyczka do Obsidiana Desktop. Zaznacz kartę tekstową na zwykłej mapie 
 3. Utwórz zwykłą mapę Canvas z jedną kartą tekstową. Kliknij kartę prawym przyciskiem i wybierz **Rozwiń gałąź z Qwenem**. Obejrzyj treść i zaznacz ewentualne sąsiednie karty tekstowe.
 4. Kliknij **Zaproponuj gałęzie**. Zaznacz propozycje, które chcesz wykorzystać, popraw ich nazwy i kliknij **Dodaj wybrane**. Możesz rozwinąć każdą nową kartę.
 
+Przy pobieraniu przez **Code → Download ZIP** GitHub nadaje katalogowi nazwę `obsidian-canvas-llm-extender-main`. Otwórz ten katalog w ZIP-ie i skopiuj `main.js`, `manifest.json` oraz `styles.css` bezpośrednio do `.obsidian/plugins/canvas-qwen-branches/` w swoim sejfie. Po odświeżeniu listy zainstalowanych wtyczek zobaczysz **Canvas Qwen 0.5.0**.
+
 ## Połączenie i dane
 
 Serwer i model działają na tym samym komputerze co Obsidian. Wtyczka wykonuje jedno żądanie do `/v1/chat/completions` po kliknięciu przycisku. Adres ogranicza do interfejsu pętli zwrotnej. Odrzuca przekierowania. Serwer musi obsługiwać odpowiedzi JSON Schema. Użyj modelu załadowanego z dysku. Konfiguracja samego serwera decyduje o tym, gdzie wykonuje on obliczenia.
