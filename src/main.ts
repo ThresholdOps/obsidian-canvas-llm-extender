@@ -16,6 +16,7 @@ export default class CanvasQwenPlugin extends Plugin {
             baseUrl: typeof data?.baseUrl === "string" ? data.baseUrl : defaultSettings.baseUrl,
             model: typeof data?.model === "string" ? data.model : defaultSettings.model,
             mode: data?.mode === "server" ? "server" : "local",
+            streamBranches: data?.streamBranches === true,
             credential: typeof data?.credential?.name === "string" && typeof data.credential.endpoint === "string"
                 ? { name: data.credential.name, endpoint: data.credential.endpoint } : null,
         };

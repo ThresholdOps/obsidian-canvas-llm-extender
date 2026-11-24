@@ -56,7 +56,9 @@ export class BranchModal extends Modal {
                 status.setText("Qwen przygotowuje propozycje…");
                 try {
                     const labels = await suggestBranches(this.settings, this.card.text, context, this.controller.signal,
-                        name => this.app.secretStorage.getSecret(name));
+                        name => this.app.secretStorage.getSecret(name), () => {
+                            if (!this.controller.signal.aborted) status.setText("Serwer przesyła odpowiedź…");
+                        });
                     if (!this.controller.signal.aborted) this.drawSuggestions(labels);
                 } catch (error) {
                     if (this.controller.signal.aborted) return;

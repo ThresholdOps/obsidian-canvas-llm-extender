@@ -106,6 +106,21 @@ test("an unavailable local server leaves the map alone and enables retry", async
     assert.equal(ui.graph().nodes.length,1);
 });
 
+test("an interrupted event stream leaves the Canvas untouched and re-enables the button", async t => {
+    const settings=await mockServer(t,(_,res)=>{
+        res.writeHead(200,{"Content-Type":"text/event-stream"});
+        const content=JSON.stringify({branches:["Trasa","Mapa","Nocleg"]});
+        res.end("data: "+JSON.stringify({choices:[{delta:{content}}]})+"\n\n");
+    });
+    const ui=await dialog(t,settings);
+    await button("Zaproponuj").onclick();
+    assert.match(document.querySelector('[role="status"]').textContent,/pełnej odpowiedzi/);
+    assert.equal(button("Dodaj wybrane"),undefined);
+    assert.equal(button("Zaproponuj").disabled,false);
+    assert.equal(ui.graph().nodes.length,1);
+    assert.equal(ui.saves(),0);
+});
+
 if (process.env.CANVAS_QWEN_TEST_MODEL) {
     const model = process.env.CANVAS_QWEN_TEST_MODEL;
     const connections = [{name:"loopback", settings:{baseUrl:process.env.CANVAS_QWEN_TEST_URL, model}}];
@@ -113,6 +128,7 @@ if (process.env.CANVAS_QWEN_TEST_MODEL) {
     if (gateway) connections.push({name:"authenticated HTTPS", settings:{
         mode:"server",baseUrl:gateway,model,credential:{name:"integration",endpoint:gateway+"/chat/completions"},
     }});
+    if (gateway) connections.push({name:"streamed HTTPS",settings:{...connections[1].settings,streamBranches:true}});
     if (gateway) test("the settings button checks a real HTTPS chat once with the already selected secret", async t => {
         let reads=0;
         const app={settings:connections[1].settings,workspace:{on(){}},secretStorage:{
@@ -157,6 +173,7 @@ test("upgrading a configured server keeps it opt-in and stores only the selected
     const plugin = new Plugin(app);
     await plugin.onload();
     assert.equal(plugin.settings.mode,"local");
+    assert.equal(plugin.settings.streamBranches,false);
     assert.equal(plugin.settings.model,"my-qwen");
     const tab = app.settingsTab;
     tab.display();
@@ -171,6 +188,12 @@ test("upgrading a configured server keeps it opt-in and stores only the selected
     pick.value="qwen-test";
     await pick.onchange();
     assert.deepEqual(app.saved.credential,{name:"qwen-test",endpoint:"https://example.org/gateway/v1/chat/completions"});
+    const stream=pane.querySelectorAll("select")[1];
+    stream.querySelector('option[value="full"]').selected=false;
+    stream.querySelector('option[value="stream"]').selected=true;
+    await stream.onchange();
+    assert.equal(app.saved.streamBranches,true);
+    assert.equal(app.saved.credential.name,"qwen-test");
     assert.equal(JSON.stringify(app.saved).includes("test-only-raw-value"),false);
     const address = [...pane.querySelectorAll('input')].find(el=>el.value===app.settings.baseUrl);
     const change = () => address.dispatchEvent(new address.ownerDocument.defaultView.Event("change"));
