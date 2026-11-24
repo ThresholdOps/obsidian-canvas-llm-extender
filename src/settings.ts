@@ -1,6 +1,6 @@
 import { App, PluginSettingTab, SecretComponent, Setting } from "obsidian";
 import type CanvasQwenPlugin from "./main";
-import { localEndpoint, serverEndpoint } from "./local-qwen";
+import { localEndpoint, serverEndpoint, testChat } from "./local-qwen";
 import type { QwenSettings } from "./local-qwen";
 
 export const defaultSettings: QwenSettings = {
@@ -8,11 +8,23 @@ export const defaultSettings: QwenSettings = {
 };
 
 export class QwenSettingsTab extends PluginSettingTab {
+    private clearTest?: () => void;
+
     constructor(app: App, private readonly plugin: CanvasQwenPlugin) {
         super(app, plugin);
     }
 
+    resetChatTest(): void {
+        this.clearTest?.();
+    }
+
+    hide(): void {
+        this.resetChatTest();
+        this.clearTest = undefined;
+    }
+
     display(): void {
+        this.hide();
         this.containerEl.empty();
         const settings = this.plugin.settings;
         const server = settings.mode === "server";
@@ -81,5 +93,40 @@ export class QwenSettingsTab extends PluginSettingTab {
             field.inputEl.addEventListener("change", () => updateAddress(field.getValue(), true));
         });
         updateAddress(settings.baseUrl, false);
+        if (server) this.addChatTest();
+    }
+
+    private addChatTest(): void {
+        const row = new Setting(this.containerEl)
+            .setName("Test czatu")
+            .setDesc("Wysyła wyłącznie tekst „Odpowiedz tylko OK.” do wybranego modelu, z użyciem wybranego sekretu.");
+        const status = this.containerEl.createDiv({ attr: { role: "status", "aria-live": "polite" } });
+        let pending: AbortController | undefined;
+        row.addButton(button => {
+            this.clearTest = () => {
+                pending?.abort();
+                pending = undefined;
+                status.empty();
+                button.setDisabled(false);
+            };
+            button.setButtonText("Sprawdź czat").onClick(async () => {
+                if (pending) return;
+                const controller = new AbortController();
+                pending = controller;
+                button.setDisabled(true);
+                status.setText("Oczekiwanie na odpowiedź czatu…");
+                try {
+                    await testChat(this.plugin.settings, controller.signal, name => this.app.secretStorage.getSecret(name));
+                    if (!controller.signal.aborted) status.setText("CZAT OK · HTTP 200.");
+                } catch (error) {
+                    if (!controller.signal.aborted) status.setText((error as Error).message);
+                } finally {
+                    if (pending === controller) {
+                        pending = undefined;
+                        button.setDisabled(false);
+                    }
+                }
+            });
+        });
     }
 }

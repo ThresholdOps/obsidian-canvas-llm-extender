@@ -1,10 +1,13 @@
 import { request as httpRequest } from "node:http";
+import type { IncomingMessage } from "node:http";
 import { request as httpsRequest } from "node:https";
 import { getCACertificates } from "node:tls";
 
 export const maxBranches = 5;
 export const maxLabelLength = 160;
 const maxResponseBytes = 256 * 1024;
+const maxErrorBytes = 8192;
+type ReadSecret = (name: string) => string | null;
 
 export interface QwenSettings {
     baseUrl: string;
@@ -88,14 +91,21 @@ export function validateLabels(value: unknown): string[] {
     return labels;
 }
 
-export function readSuggestions(raw: string, existing: string[]): string[] {
+export function readSuggestions(raw: string, existing: string[], allowBullets = false): string[] {
     const seen = new Set(existing.map(text => text.trim().toLocaleLowerCase("pl")));
     const labels: string[] = [];
     try {
         const reply = JSON.parse(raw);
         const content: string = reply.choices[0].message.content.trim();
-        const fenced = /^```(?:json)?\s*\n([\s\S]*?)\n\s*```$/i.exec(content);
-        const candidates = JSON.parse(fenced ? fenced[1] : content).branches;
+        let candidates: unknown;
+        if (allowBullets && /^[-*] /.test(content)) {
+            const lines = content.split(/\r?\n/);
+            if (lines.length < 3 || lines.length > maxBranches || !lines.every(line => /^[-*] \S/.test(line))) throw new Error();
+            candidates = lines.map(line => line.slice(2));
+        } else {
+            const fenced = /^```(?:json)?\s*\n([\s\S]*?)\n\s*```$/i.exec(content);
+            candidates = JSON.parse(fenced ? fenced[1] : content).branches;
+        }
         if (!Array.isArray(candidates) || !candidates.length || candidates.length > maxBranches) throw new Error();
         for (const candidate of candidates) {
             const [label] = validateLabels([candidate]);
@@ -111,21 +121,8 @@ export function readSuggestions(raw: string, existing: string[]): string[] {
 }
 
 export async function suggestBranches(settings: QwenSettings, card: string, neighbours: string[],
-    signal: AbortSignal, readSecret?: (name: string) => string | null): Promise<string[]> {
+    signal: AbortSignal, readSecret?: ReadSecret): Promise<string[]> {
     const { url, model, secret } = connection(settings);
-    const headers: Record<string, string | number> = { "Content-Type": "application/json" };
-    if (secret) {
-        let key: string | undefined;
-        try {
-            key = readSecret?.(secret)?.trim().replace(/^Bearer[ \t]+/i, "");
-        } catch {
-            throw new Error("Nie udało się odczytać klucza z magazynu sekretów Obsidiana.");
-        }
-        if (!key || !/^[\x21-\x7e]+$/.test(key)) {
-            throw new Error("Sprawdź wartość klucza API w magazynie sekretów Obsidiana.");
-        }
-        headers.Authorization = "Bearer " + key;
-    }
     const payload = JSON.stringify({
         model, stream: false, temperature: secret ? undefined : 0.5, max_tokens: secret ? undefined : 2048,
         messages: [
@@ -141,21 +138,92 @@ export async function suggestBranches(settings: QwenSettings, card: string, neig
             } },
         },
     });
+    const raw = await postChat(url, secret, payload, signal, readSecret);
+    return readSuggestions(raw, [card, ...neighbours], settings.mode === "server");
+}
+
+export async function testChat(settings: QwenSettings, signal: AbortSignal, readSecret: ReadSecret): Promise<void> {
+    if (settings.mode !== "server") throw new Error("Wybierz tryb serwera HTTPS, aby sprawdzić czat.");
+    const { url, model, secret } = connection(settings);
+    const payload = JSON.stringify({ model, messages: [{ role: "user", content: "Odpowiedz tylko OK." }], stream: false });
+    const raw = await postChat(url, secret, payload, signal, readSecret);
+    try {
+        const message = JSON.parse(raw)?.choices?.[0]?.message;
+        if (!message || typeof message !== "object" || Array.isArray(message) ||
+            (typeof message.content !== "string" && message.role !== "assistant")) throw new Error();
+    } catch {
+        throw new Error("HTTP 200 · odpowiedź bez wiadomości Chat Completions.");
+    }
+}
+
+async function notFoundError(response: IncomingMessage): Promise<Error> {
+    const html = "HTTP 404 · HTML. Serwer zwrócił stronę WWW.";
+    const generic = "HTTP 404 · serwer nie podał rozpoznanej przyczyny.";
+    const media = response.headers["content-type"]?.split(";")[0].trim().toLowerCase() ?? "";
+    if (media === "text/html" || media === "application/xhtml+xml") {
+        response.destroy();
+        return new Error(html);
+    }
+    // Inspect a bounded error body locally. Only our fixed descriptions can reach the UI.
+    const parts: Buffer[] = [];
+    let size = 0;
+    try {
+        for await (const chunk of response) {
+            const part = Buffer.from(chunk).subarray(0, maxErrorBytes - size);
+            parts.push(part);
+            size += part.length;
+            if (size === maxErrorBytes) break;
+        }
+    } catch { /* The status is still valid if the body was interrupted. */ }
+    const body = Buffer.concat(parts).toString("utf8").trim();
+    if (/^(?:<!doctype\s+html|<html\b)/i.test(body)) return new Error(html);
+    let data;
+    try { data = JSON.parse(body); } catch { return new Error(generic); }
+    const error = data?.error ?? data;
+    const code = [error?.code, error?.type].filter(value => typeof value === "string").join(" ");
+    const message = typeof error === "string" ? error : error?.message ?? data?.detail;
+    if (/\b(?:invalid_api_key|invalid_token|authentication_error|permission_denied)\b/i.test(code))
+        return new Error("HTTP 404 · JSON. Serwer wskazał klucz lub uprawnienia.");
+    if (/\b(?:model_not_found|modelnotfound(?:error)?|deploymentnotfound)\b/i.test(code) ||
+        (typeof message === "string" && /\bmodel\b[^\n]{0,200}\b(?:not found|does not exist)\b/i.test(message)))
+        return new Error("HTTP 404 · JSON. Serwer zgłosił niedostępny model.");
+    return new Error("HTTP 404 · JSON. Serwer zwrócił błąd dla tego żądania.");
+}
+
+async function postChat(url: URL, secret: string | null, payload: string, signal: AbortSignal,
+    readSecret?: ReadSecret): Promise<string> {
+    const headers: Record<string, string | number> = { "Content-Type": "application/json" };
+    if (signal.aborted) throw new Error("Anulowano żądanie.");
+    if (secret) {
+        let key: string | undefined;
+        try {
+            key = readSecret?.(secret)?.trim().replace(/^Bearer[ \t]+/i, "");
+        } catch {
+            throw new Error("Nie udało się odczytać klucza z magazynu sekretów Obsidiana.");
+        }
+        if (!key || !/^[\x21-\x7e]+$/.test(key)) {
+            throw new Error("Sprawdź wartość klucza API w magazynie sekretów Obsidiana.");
+        }
+        headers.Authorization = "Bearer " + key;
+    }
     headers["Content-Length"] = Buffer.byteLength(payload);
     const transport = url.protocol === "https:" ? httpsRequest : httpRequest;
     // Include trusted enterprise roots on desktop runtimes that expose the OS certificate store.
     const ca = secret && typeof getCACertificates === "function"
         ? [...new Set([...getCACertificates("default"), ...getCACertificates("system")])] : undefined;
-    const raw = await new Promise<string>((resolve, reject) => {
+    return new Promise<string>((resolve, reject) => {
         const req = transport(url, {
             method: "POST", agent: false, signal, headers, ca, rejectUnauthorized: true,
         }, res => {
+            if (res.statusCode === 404) {
+                void notFoundError(res).then(reject, () => reject(new Error("HTTP 404.")));
+                return;
+            }
             if (res.statusCode !== 200) {
                 res.destroy();
                 const hints: Record<number, string> = {
                     401: "Sprawdź wartość i ważność klucza API.",
                     403: "Sprawdź uprawnienia klucza do wybranego modelu.",
-                    404: "Porównaj adres API i nazwę modelu z instrukcją serwera.",
                 };
                 const status = res.statusCode ?? 0;
                 const hint = status >= 300 && status < 400 ? "Wpisz docelowy adres API. Przekierowania są wyłączone."
@@ -190,5 +258,4 @@ export async function suggestBranches(settings: QwenSettings, card: string, neig
         });
         req.end(payload);
     });
-    return readSuggestions(raw, [card, ...neighbours]);
 }
