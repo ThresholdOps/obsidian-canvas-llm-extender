@@ -1,10 +1,10 @@
 {
-	"id": "canvas-llm-extender",
-	"name": "Canvas LLM Extender",
-	"version": "0.4",
-	"minAppVersion": "1.11.4",
-	"description": "Let an LLM add nodes to your canvas.",
-	"author": "Phasip",
-	"authorUrl": "https://github.com/phasip/canvas-llm-extender",
-	"isDesktopOnly": false
+  "id": "canvas-qwen-branches",
+  "name": "Canvas Qwen",
+  "version": "0.5.0",
+  "minAppVersion": "1.11.4",
+  "description": "Rozwijaj mapy myśli w Canvas z lokalnym modelem Qwen.",
+  "author": "ThresholdOps, Phasip",
+  "authorUrl": "https://github.com/ThresholdOps/obsidian-canvas-llm-extender",
+  "isDesktopOnly": true
 }

@@ -1,87 +1,55 @@
-import { Plugin, Menu, MenuItem } from "obsidian";
-import {
-    addNodeChild,
-    getNodeNeighbours,
-    isCanvasNodeData
-} from "./obsidian-canvas-utils";
+import { Notice, Plugin } from "obsidian";
+import { BranchModal } from "./branch-modal";
+import { adjacentTextCards, appendBranches, isCanvasCard, textCard } from "./obsidian-canvas-utils";
+import type { QwenSettings } from "./local-qwen";
+import { defaultSettings, QwenSettingsTab } from "./settings";
 
-import {
-    notifyError
-} from "./obsidian-helpers";
+export default class CanvasQwenPlugin extends Plugin {
+    settings: QwenSettings = { ...defaultSettings };
+    private modal?: BranchModal;
 
-import {
-    openai_get_reply
-} from "./openai-utils";
-
-import {
-    DEFAULT_SETTINGS,
-    CanvasLLMExtendPluginSettings,
-    CanvasLLMExtendPluginSettingsTab
-} from "./settings";
-export default class CanvasLLMExtendPlugin extends Plugin {
-    settings: CanvasLLMExtendPluginSettings;
-
-    async onload() {
-        try {
-            await this.loadSettings();
-        } catch (error) {
-            notifyError(`Error loading settings: ${error}`);
-        }
-
-          
-        // Add a new menu item to the canvas node menu
-        this.registerEvent(this.app.workspace.on("canvas:node-menu", (menu: Menu, node: unknown) => {
-                menu.addItem((i: MenuItem) => {
-                    i.setSection("canvasLLMExtend");
-                    i.setTitle("LLM Extend");
-                    i.onClick((_e: unknown) => {
-                        this.extendNode(node);
-                    });
-                });
-            }
-        ));
-
-        this.addSettingTab(new CanvasLLMExtendPluginSettingsTab(this.app, this));
+    async onload(): Promise<void> {
+        const data = await this.loadData();
+        this.settings = {
+            baseUrl: typeof data?.baseUrl === "string" ? data.baseUrl : defaultSettings.baseUrl,
+            model: typeof data?.model === "string" ? data.model : defaultSettings.model,
+        };
+        this.addSettingTab(new QwenSettingsTab(this.app, this));
+        this.registerEvent(this.app.workspace.on("canvas:node-menu", (menu, node: unknown) => {
+            if (!isCanvasCard(node) || !textCard(node.canvas.getData(), node.id)) return;
+            menu.addItem(item => item.setTitle("Rozwiń gałąź z Qwenem").setIcon("git-fork")
+                .onClick(() => this.openBranches(node)));
+        }));
     }
 
-    async extendNode(node: unknown) {
-        if (!isCanvasNodeData(node)) {
-            notifyError("Node is not Canvas Node");
-            return;
-        }
-
-        const d = getNodeNeighbours(node);
-        let prompt = `${this.settings.defaultPrompt}\n`;
-        d.incoming.forEach(incoming => 
-                getNodeNeighbours(incoming).outgoing.forEach(sibling => 
-                    prompt += `Sibling: ${sibling.text}\n`
-                )
-            );
-        d.incoming.forEach(incoming => prompt += `Incoming: ${incoming.text}\n`);
-        prompt += `Main: ${node.text}\n`;
-        d.outgoing.forEach(outgoing => prompt += `Outgoing: ${outgoing.text}\n`);
-
-        let r = await openai_get_reply(prompt, this.settings.model, this.settings.temperature, this.settings.apiKey, this.settings.baseUrl);
-        if (r == null) {
-            notifyError("Failed to get reply from OpenAI");
-            return;
-        }
-
-        const banned = ["outgoing:", "new outgoing:","new outgoing node:","new node:","node:","additional item:","item:"];
-        for (const banword of banned) {
-            if (r.toLowerCase().startsWith(banword)) {
-                r = r.substring(banword.length);
-            }
-        }
-
-        addNodeChild(node, r.trim());
-    }
-    
-    async loadSettings() {
-        this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
-    }
-
-    async saveSettings() {
+    async updateSettings(changes: Partial<QwenSettings>): Promise<void> {
+        this.settings = { ...this.settings, ...changes };
         await this.saveData(this.settings);
+    }
+
+    private openBranches(node: unknown): void {
+        if (!isCanvasCard(node)) return;
+        const { canvas, id } = node;
+        const data = canvas.getData();
+        const card = textCard(data, id);
+        if (!card || !card.text.trim()) {
+            new Notice("Wpisz temat w karcie tekstowej.");
+            return;
+        }
+        const source = { ...card };
+        this.modal?.close();
+        this.modal = new BranchModal(this.app, source,
+            adjacentTextCards(data, id).map(n => ({ ...n })), { ...this.settings }, labels => {
+                const stillOpen = this.app.workspace.getLeavesOfType("canvas").some(leaf =>
+                    "canvas" in leaf.view && leaf.view.canvas === canvas);
+                if (!stillOpen) throw new Error("Mapa została zamknięta. Otwórz ją ponownie.");
+                canvas.setData(appendBranches(canvas.getData(), id, source.text, labels));
+                canvas.requestSave(true);
+            }, () => { this.modal = undefined; });
+        this.modal.open();
+    }
+
+    onunload(): void {
+        this.modal?.close();
     }
 }
