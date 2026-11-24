@@ -4,9 +4,9 @@ Rozwijaj mapy myśli w Obsidianie Desktop za pomocą Qwena. Możesz korzystać z
 
 ## Instalacja i aktualizacja
 
-[Pobierz Canvas Qwen 0.6.1 dla Obsidiana Desktop](https://github.com/ThresholdOps/obsidian-canvas-llm-extender/raw/refs/heads/pilot-builds/packages/canvas-qwen-branches-0.6.1.zip)
+[Pobierz Canvas Qwen 0.6.2 dla Obsidiana Desktop](https://github.com/ThresholdOps/obsidian-canvas-llm-extender/raw/refs/heads/pilot-builds/packages/canvas-qwen-branches-0.6.2.zip)
 
-Przy pierwszej instalacji rozpakuj folder `canvas-qwen-branches` do `.obsidian/plugins/` w sejfie. Przy aktualizacji wyłącz wtyczkę i skopiuj z ZIP-a `main.js`, `manifest.json` i `styles.css` do katalogu, w którym masz już zainstalowaną wersję. Następnie odśwież listę zainstalowanych wtyczek i włącz **Canvas Qwen 0.6.1**. Wtyczka wymaga Obsidiana Desktop 1.11.4 lub nowszego.
+Przy pierwszej instalacji rozpakuj folder `canvas-qwen-branches` do `.obsidian/plugins/` w sejfie. Przy aktualizacji wyłącz wtyczkę i skopiuj z ZIP-a `main.js`, `manifest.json` i `styles.css` do katalogu, w którym masz już zainstalowaną wersję. Następnie odśwież listę zainstalowanych wtyczek i włącz **Canvas Qwen 0.6.2**. Wtyczka wymaga Obsidiana Desktop 1.11.4 lub nowszego.
 
 Archiwum **Code → Download ZIP** również zawiera gotowe pliki. GitHub umieszcza je w folderze `obsidian-canvas-llm-extender-main`.
 
@@ -18,6 +18,8 @@ Archiwum **Code → Download ZIP** również zawiera gotowe pliki. GitHub umiesz
 4. W ustawieniach kliknij **Sprawdź czat**. Wtyczka wyśle do wybranego modelu jedno pytanie „Odpowiedz tylko OK.”, korzystając z aktualnie wybranego sekretu. **CZAT OK · HTTP 200** oznacza, że Obsidian odebrał wiadomość czatu.
 5. W przeglądarce plików Obsidiana kliknij folder prawym przyciskiem i wybierz **Nowa tablica**. Kliknij dwukrotnie tło i wpisz temat w karcie tekstowej. Kliknij obramowanie karty prawym przyciskiem i wybierz **Rozwiń gałąź z Qwenem**. Sprawdź model, adres i zaznaczone karty, po czym kliknij **Zaproponuj gałęzie**. Możesz poprawić nazwy i dodać tylko wybrane propozycje. W trybie HTTPS wtyczka przyjmuje też odpowiedź modelu w postaci listy od trzech do pięciu krótkich punktów.
 
+Jeśli test czatu kończy się wynikiem **CZAT OK**, a dłuższa próba utworzenia gałęzi zwraca **HTTP 502** lub **504**, w ustawieniach wybierz **Odbiór propozycji → Strumieniowo (SSE)**. Na tej samej karcie kliknij ponownie **Zaproponuj gałęzie**. W tym trybie serwer może przesyłać części odpowiedzi w trakcie generowania. Podgląd gałęzi pojawia się po otrzymaniu kompletnego wyniku. Domyślny odbiór **Cała odpowiedź** jest dostępny także po aktualizacji. Oba tryby używają tego samego adresu, sekretu, modelu, polecenia i kontekstu.
+
 Zmiana adresu docelowego wymaga ponownego wybrania sekretu. W ustawieniach wtyczki są zapisane nazwa sekretu i adres, dla którego go wybrałeś. Wartość klucza obsługuje magazyn sekretów Obsidiana.
 
 ## Model na tym komputerze
@@ -28,7 +30,7 @@ Wybierz **Na tym komputerze** i wpisz nazwę pobranego modelu. Domyślny adres O
 
 Każde kliknięcie **Zaproponuj gałęzie** wysyła jedno żądanie Chat Completions do wskazanego serwera. W kontekście znajduje się tekst głównej karty oraz tekst wybranych sąsiadów. Wtyczka odrzuca przekierowania, sprawdza certyfikat HTTPS i pomija treści żądań, odpowiedzi i klucz w logach. Serwer HTTPS może korzystać z podstawowego API Chat Completions bez rozszerzenia JSON Schema. Zamknięcie okna przerywa oczekiwanie na odpowiedź.
 
-Przy HTTP 401 sprawdź klucz, a przy 403 uprawnienia do modelu. Przy HTTP 404 test czatu i generowanie gałęzi rozpoznają m.in. stronę HTML, błąd JSON zgłaszający niedostępny model oraz błąd JSON wskazujący na uprawnienia. Opis pochodzi z wtyczki. Treść komunikatu zwróconego przez serwer pozostaje lokalna i nie trafia do logów ani na ekran.
+Przy HTTP 502 lub 504 wtyczka podaje czas do otrzymania odpowiedzi bramy. Tryb strumieniowy wymaga obsługi SSE przez serwer i urządzenia pośredniczące. Licznik czasu nie wskazuje, który element zgłosił problem. Przy HTTP 401 sprawdź klucz, a przy 403 uprawnienia do modelu. Przy HTTP 404 test czatu i generowanie gałęzi rozpoznają m.in. stronę HTML, błąd JSON zgłaszający niedostępny model oraz błąd JSON wskazujący na uprawnienia. Opis pochodzi z wtyczki. Treść komunikatu zwróconego przez serwer pozostaje lokalna i nie trafia do logów ani na ekran.
 
 ## Budowanie i testy
 

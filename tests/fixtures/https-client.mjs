@@ -37,3 +37,11 @@ for (const [model, expected] of [
 }
 await assert.rejects(checkChat("invalid",{mode:"local"}), /tryb serwera/);
 await assert.rejects(checkChat("invalid",{credential:null}), /wybierz klucz/);
+
+const ask = (streamBranches, onStreamData) => suggestBranches({...settings,streamBranches},
+    "Próba dwóch formatów",["Sąsiad"],new AbortController().signal,getSecret,onStreamData);
+await assert.rejects(ask(false),error=>/HTTP 502 po \d+ s/.test(error.message) &&
+    !error.message.includes(process.env.CANVAS_TEST_TOKEN) && !error.message.includes("adres"));
+let starts=0;
+assert.deepEqual(await ask(true,()=>{starts++;}),["Trasa","Łódź","Bagaż"]);
+assert.equal(starts,1);

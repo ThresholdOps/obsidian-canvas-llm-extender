@@ -24,6 +24,7 @@ test("trusted HTTPS receives one Bearer request per click; untrusted TLS, redire
         const token = randomUUID();
         const calls=[];
         const chatTests=[];
+        const comparison=[];
         const server=createServer({cert:await readFile(cert),key:await readFile(key)},async(req,res)=>{
             let body="";
             for await(const chunk of req) body+=chunk;
@@ -51,6 +52,24 @@ test("trusted HTTPS receives one Bearer request per click; untrusted TLS, redire
                 return;
             }
             const data=JSON.parse(payload.messages[1].content);
+            if (data.karta === "Próba dwóch formatów") {
+                assert.equal(req.url,"/gateway/v1/chat/completions");
+                assert.equal(req.method,"POST");
+                assert.equal(req.headers.authorization,`Bearer ${token}`);
+                assert.equal(Number(req.headers["content-length"]),Buffer.byteLength(body));
+                comparison.push(body);
+                if (!payload.stream) {
+                    res.writeHead(502,{"Content-Type":"text/html"});
+                    res.end("private-body-"+token);
+                    return;
+                }
+                res.writeHead(200,{"Content-Type":"text/event-stream; charset=UTF-8"});
+                res.write(": keep-alive\n\n");
+                const content=JSON.stringify({branches:["Trasa","Łódź","Bagaż"]});
+                res.write("data: "+JSON.stringify({choices:[{delta:{content}}]})+"\n\n");
+                res.end("data: [DONE]\n\n");
+                return;
+            }
             calls.push({ path:req.url, method:req.method, authorized:req.headers.authorization===`Bearer ${token}`, data,
                 model:payload.model, hasSchema:Object.hasOwn(payload,"response_format") });
             const status=Number(data.karta);
@@ -73,6 +92,10 @@ test("trusted HTTPS receives one Bearer request per click; untrusted TLS, redire
         });
         assert.deepEqual(calls.map(c=>c.data.karta),["200","401","403","404","307"]);
         assert.deepEqual(chatTests,["chat-ok","missing-model","key-error","unknown-resource","proxy-page","long-error","unexpected-200","redirect-chat"]);
+        assert.equal(comparison.length,2);
+        assert.equal(JSON.parse(comparison[0]).stream,false);
+        assert.equal(JSON.parse(comparison[1]).stream,true);
+        assert.equal(comparison[1],comparison[0].replace('"stream":false','"stream":true'));
         for(const call of calls) {
             assert.equal(call.method,"POST");
             assert.equal(call.path,"/gateway/v1/chat/completions");

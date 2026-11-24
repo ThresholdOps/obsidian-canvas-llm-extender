@@ -36,6 +36,98 @@ var import_obsidian = require("obsidian");
 var import_node_http = require("node:http");
 var import_node_https = require("node:https");
 var import_node_tls = require("node:tls");
+
+// src/chat-stream.ts
+var maxWireBytes = 8 * 1024 * 1024;
+var maxEventChars = 256 * 1024;
+var StreamError = class extends Error {
+};
+async function* streamLines(chunks, onFirstData) {
+  const decoder = new TextDecoder("utf-8", { fatal: true });
+  let carry = "";
+  let afterCR = false;
+  let received = 0;
+  for await (const chunk of chunks) {
+    if (!chunk.byteLength) continue;
+    if (!received) onFirstData == null ? void 0 : onFirstData();
+    received += chunk.byteLength;
+    if (received > maxWireBytes) throw new StreamError("Strumie\u0144 przekroczy\u0142 dopuszczalny rozmiar.");
+    let text = decoder.decode(chunk, { stream: true });
+    if (!text) continue;
+    if (afterCR && text.startsWith("\n")) text = text.slice(1);
+    afterCR = text.endsWith("\r");
+    const lines = text.split(/\r\n|[\n\r]/);
+    lines[0] = carry + lines[0];
+    carry = lines.pop();
+    if (carry.length > maxEventChars) throw new StreamError("Pojedynczy fragment strumienia jest za du\u017Cy.");
+    yield* lines;
+  }
+  carry += decoder.decode();
+  if (carry) yield carry;
+}
+async function* streamEvents(chunks, onFirstData) {
+  let fields = [];
+  let size = 0;
+  let event = "";
+  for await (const line of streamLines(chunks, onFirstData)) {
+    if (line === "") {
+      if (event === "error") throw new StreamError("Serwer zg\u0142osi\u0142 b\u0142\u0105d w trakcie przesy\u0142ania odpowiedzi.");
+      if (fields.length) yield fields.join("\n");
+      fields = [];
+      size = 0;
+      event = "";
+      continue;
+    }
+    const colon = line.indexOf(":");
+    const key = colon < 0 ? line : line.slice(0, colon);
+    if (key !== "event" && key !== "data") continue;
+    const value = colon < 0 ? "" : line.slice(colon + 1).replace(/^ /, "");
+    if (key === "event") {
+      event = value;
+      continue;
+    }
+    size += value.length + 1;
+    if (size > maxEventChars) throw new StreamError("Pojedynczy fragment strumienia jest za du\u017Cy.");
+    fields.push(value);
+  }
+  if (fields.length || event) throw new StreamError("Po\u0142\u0105czenie zako\u0144czy\u0142o si\u0119 w po\u0142owie zdarzenia strumienia.");
+}
+async function readChatStream(chunks, maxContentBytes, onFirstData) {
+  var _a;
+  const parts = [];
+  let size = 0;
+  let finished = false;
+  try {
+    for await (const data of streamEvents(chunks, onFirstData)) {
+      if (data.trim() === "[DONE]") {
+        finished = true;
+        break;
+      }
+      const frame = JSON.parse(data);
+      if (frame == null ? void 0 : frame.error) throw new StreamError("Serwer zg\u0142osi\u0142 b\u0142\u0105d w trakcie przesy\u0142ania odpowiedzi.");
+      if (!Array.isArray(frame == null ? void 0 : frame.choices)) throw new StreamError("Serwer zwr\xF3ci\u0142 niepoprawne zdarzenie czatu.");
+      const choice = frame.choices.find((item) => item && (item.index === 0 || item.index === void 0));
+      if (!choice) continue;
+      if (choice.finish_reason != null) {
+        if (choice.finish_reason !== "stop") throw new StreamError("Model zako\u0144czy\u0142 strumie\u0144 bez pe\u0142nej odpowiedzi.");
+        finished = true;
+      }
+      const text = (_a = choice.delta) == null ? void 0 : _a.content;
+      if (text == null || text === "") continue;
+      if (typeof text !== "string") throw new StreamError("Serwer zwr\xF3ci\u0142 niepoprawny fragment tekstu.");
+      size += Buffer.byteLength(text);
+      if (size > maxContentBytes) throw new StreamError("Odpowied\u017A modelu przekroczy\u0142a dopuszczalny rozmiar.");
+      parts.push(text);
+    }
+  } catch (error) {
+    if (error instanceof StreamError) throw error;
+    throw new StreamError("Przerwano strumie\u0144 lub serwer przes\u0142a\u0142 niepoprawne dane czatu.");
+  }
+  if (!finished || !size) throw new StreamError("Serwer nie przes\u0142a\u0142 pe\u0142nej odpowiedzi tekstowej.");
+  return parts.join("");
+}
+
+// src/local-qwen.ts
 var maxBranches = 5;
 var maxLabelLength = 160;
 var maxResponseBytes = 256 * 1024;
@@ -134,11 +226,11 @@ function readSuggestions(raw, existing, allowBullets = false) {
   if (!labels.length) throw new Error("Model powt\xF3rzy\u0142 istniej\u0105ce tytu\u0142y. Spr\xF3buj ponownie.");
   return labels;
 }
-async function suggestBranches(settings, card, neighbours, signal, readSecret) {
+async function suggestBranches(settings, card, neighbours, signal, readSecret, onStreamData) {
   const { url, model, secret } = connection(settings);
   const payload = JSON.stringify({
     model,
-    stream: false,
+    stream: settings.mode === "server" && settings.streamBranches === true,
     temperature: secret ? void 0 : 0.5,
     max_tokens: secret ? void 0 : 2048,
     messages: [
@@ -156,7 +248,7 @@ async function suggestBranches(settings, card, neighbours, signal, readSecret) {
       } }
     }
   });
-  const raw = await postChat(url, secret, payload, signal, readSecret);
+  const raw = await postChat(url, secret, payload, signal, readSecret, onStreamData);
   return readSuggestions(raw, [card, ...neighbours], settings.mode === "server");
 }
 async function testChat(settings, signal, readSecret) {
@@ -209,7 +301,7 @@ async function notFoundError(response) {
     return new Error("HTTP 404 \xB7 JSON. Serwer zg\u0142osi\u0142 niedost\u0119pny model.");
   return new Error("HTTP 404 \xB7 JSON. Serwer zwr\xF3ci\u0142 b\u0142\u0105d dla tego \u017C\u0105dania.");
 }
-async function postChat(url, secret, payload, signal, readSecret) {
+async function postChat(url, secret, payload, signal, readSecret, onStreamData) {
   var _a;
   const headers = { "Content-Type": "application/json" };
   if (signal.aborted) throw new Error("Anulowano \u017C\u0105danie.");
@@ -229,6 +321,7 @@ async function postChat(url, secret, payload, signal, readSecret) {
   const transport = url.protocol === "https:" ? import_node_https.request : import_node_http.request;
   const ca = secret && typeof import_node_tls.getCACertificates === "function" ? [.../* @__PURE__ */ new Set([...(0, import_node_tls.getCACertificates)("default"), ...(0, import_node_tls.getCACertificates)("system")])] : void 0;
   return new Promise((resolve, reject) => {
+    const started = Date.now();
     const req = transport(url, {
       method: "POST",
       agent: false,
@@ -237,13 +330,19 @@ async function postChat(url, secret, payload, signal, readSecret) {
       ca,
       rejectUnauthorized: true
     }, (res) => {
-      var _a2, _b;
+      var _a2, _b, _c;
       if (res.statusCode === 404) {
         void notFoundError(res).then(reject, () => reject(new Error("HTTP 404.")));
         return;
       }
       if (res.statusCode !== 200) {
         res.destroy();
+        if (res.statusCode === 502 || res.statusCode === 504) {
+          const seconds = Math.round((Date.now() - started) / 1e3);
+          const hint2 = res.statusCode === 502 ? "Brama otrzyma\u0142a nieprawid\u0142ow\u0105 odpowied\u017A od kolejnego serwera." : "Brama nie doczeka\u0142a si\u0119 odpowiedzi od kolejnego serwera.";
+          reject(new Error(`HTTP ${res.statusCode} po ${seconds} s. ${hint2}`));
+          return;
+        }
         const hints = {
           401: "Sprawd\u017A warto\u015B\u0107 i wa\u017Cno\u015B\u0107 klucza API.",
           403: "Sprawd\u017A uprawnienia klucza do wybranego modelu."
@@ -251,6 +350,13 @@ async function postChat(url, secret, payload, signal, readSecret) {
         const status = (_a2 = res.statusCode) != null ? _a2 : 0;
         const hint = status >= 300 && status < 400 ? "Wpisz docelowy adres API. Przekierowania s\u0105 wy\u0142\u0105czone." : (_b = hints[status]) != null ? _b : "Sprawd\u017A adres, nazw\u0119 modelu i dost\u0119pno\u015B\u0107 us\u0142ugi.";
         reject(new Error(`Serwer zwr\xF3ci\u0142 HTTP ${status}. ${hint}`));
+        return;
+      }
+      const media = (_c = res.headers["content-type"]) == null ? void 0 : _c.split(";")[0].trim().toLowerCase();
+      if (media === "text/event-stream") {
+        void readChatStream(res, maxResponseBytes, onStreamData).then((content) => {
+          resolve(JSON.stringify({ choices: [{ message: { role: "assistant", content } }] }));
+        }, reject);
         return;
       }
       const chunks = [];
@@ -339,7 +445,10 @@ var BranchModal = class extends import_obsidian.Modal {
           this.card.text,
           context,
           this.controller.signal,
-          (name) => this.app.secretStorage.getSecret(name)
+          (name) => this.app.secretStorage.getSecret(name),
+          () => {
+            if (!this.controller.signal.aborted) status.setText("Serwer przesy\u0142a odpowied\u017A\u2026");
+          }
         );
         if (!this.controller.signal.aborted) this.drawSuggestions(labels);
       } catch (error) {
@@ -464,6 +573,7 @@ var defaultSettings = {
   baseUrl: "http://127.0.0.1:11434/v1",
   model: "",
   mode: "local",
+  streamBranches: false,
   credential: null
 };
 var QwenSettingsTab = class extends import_obsidian2.PluginSettingTab {
@@ -531,7 +641,10 @@ var QwenSettingsTab = class extends import_obsidian2.PluginSettingTab {
       field.inputEl.addEventListener("change", () => updateAddress(field.getValue(), true));
     });
     updateAddress(settings.baseUrl, false);
-    if (server) this.addChatTest();
+    if (server) {
+      new import_obsidian2.Setting(this.containerEl).setName("Odbi\xF3r propozycji").addDropdown((field) => field.addOption("full", "Ca\u0142a odpowied\u017A").addOption("stream", "Strumieniowo (SSE)").setValue(settings.streamBranches ? "stream" : "full").onChange((value) => this.plugin.updateSettings({ streamBranches: value === "stream" })));
+      this.addChatTest();
+    }
   }
   addChatTest() {
     const row = new import_obsidian2.Setting(this.containerEl).setName("Test czatu").setDesc("Wysy\u0142a wy\u0142\u0105cznie tekst \u201EOdpowiedz tylko OK.\u201D do wybranego modelu, z u\u017Cyciem wybranego sekretu.");
@@ -580,6 +693,7 @@ var CanvasQwenPlugin = class extends import_obsidian3.Plugin {
       baseUrl: typeof (data == null ? void 0 : data.baseUrl) === "string" ? data.baseUrl : defaultSettings.baseUrl,
       model: typeof (data == null ? void 0 : data.model) === "string" ? data.model : defaultSettings.model,
       mode: (data == null ? void 0 : data.mode) === "server" ? "server" : "local",
+      streamBranches: (data == null ? void 0 : data.streamBranches) === true,
       credential: typeof ((_a = data == null ? void 0 : data.credential) == null ? void 0 : _a.name) === "string" && typeof data.credential.endpoint === "string" ? { name: data.credential.name, endpoint: data.credential.endpoint } : null
     };
     this.preferences = new QwenSettingsTab(this.app, this);
