@@ -39,6 +39,7 @@ var import_node_tls = require("node:tls");
 var maxBranches = 5;
 var maxLabelLength = 160;
 var maxResponseBytes = 256 * 1024;
+var maxErrorBytes = 8192;
 function localEndpoint(baseUrl) {
   let url;
   try {
@@ -105,14 +106,21 @@ function validateLabels(value) {
   }
   return labels;
 }
-function readSuggestions(raw, existing) {
+function readSuggestions(raw, existing, allowBullets = false) {
   const seen = new Set(existing.map((text) => text.trim().toLocaleLowerCase("pl")));
   const labels = [];
   try {
     const reply = JSON.parse(raw);
     const content = reply.choices[0].message.content.trim();
-    const fenced = /^```(?:json)?\s*\n([\s\S]*?)\n\s*```$/i.exec(content);
-    const candidates = JSON.parse(fenced ? fenced[1] : content).branches;
+    let candidates;
+    if (allowBullets && /^[-*] /.test(content)) {
+      const lines = content.split(/\r?\n/);
+      if (lines.length < 3 || lines.length > maxBranches || !lines.every((line) => /^[-*] \S/.test(line))) throw new Error();
+      candidates = lines.map((line) => line.slice(2));
+    } else {
+      const fenced = /^```(?:json)?\s*\n([\s\S]*?)\n\s*```$/i.exec(content);
+      candidates = JSON.parse(fenced ? fenced[1] : content).branches;
+    }
     if (!Array.isArray(candidates) || !candidates.length || candidates.length > maxBranches) throw new Error();
     for (const candidate of candidates) {
       const [label] = validateLabels([candidate]);
@@ -127,21 +135,7 @@ function readSuggestions(raw, existing) {
   return labels;
 }
 async function suggestBranches(settings, card, neighbours, signal, readSecret) {
-  var _a;
   const { url, model, secret } = connection(settings);
-  const headers = { "Content-Type": "application/json" };
-  if (secret) {
-    let key;
-    try {
-      key = (_a = readSecret == null ? void 0 : readSecret(secret)) == null ? void 0 : _a.trim().replace(/^Bearer[ \t]+/i, "");
-    } catch (e) {
-      throw new Error("Nie uda\u0142o si\u0119 odczyta\u0107 klucza z magazynu sekret\xF3w Obsidiana.");
-    }
-    if (!key || !/^[\x21-\x7e]+$/.test(key)) {
-      throw new Error("Sprawd\u017A warto\u015B\u0107 klucza API w magazynie sekret\xF3w Obsidiana.");
-    }
-    headers.Authorization = "Bearer " + key;
-  }
   const payload = JSON.stringify({
     model,
     stream: false,
@@ -162,10 +156,79 @@ async function suggestBranches(settings, card, neighbours, signal, readSecret) {
       } }
     }
   });
+  const raw = await postChat(url, secret, payload, signal, readSecret);
+  return readSuggestions(raw, [card, ...neighbours], settings.mode === "server");
+}
+async function testChat(settings, signal, readSecret) {
+  var _a, _b, _c;
+  if (settings.mode !== "server") throw new Error("Wybierz tryb serwera HTTPS, aby sprawdzi\u0107 czat.");
+  const { url, model, secret } = connection(settings);
+  const payload = JSON.stringify({ model, messages: [{ role: "user", content: "Odpowiedz tylko OK." }], stream: false });
+  const raw = await postChat(url, secret, payload, signal, readSecret);
+  try {
+    const message = (_c = (_b = (_a = JSON.parse(raw)) == null ? void 0 : _a.choices) == null ? void 0 : _b[0]) == null ? void 0 : _c.message;
+    if (!message || typeof message !== "object" || Array.isArray(message) || typeof message.content !== "string" && message.role !== "assistant") throw new Error();
+  } catch (e) {
+    throw new Error("HTTP 200 \xB7 odpowied\u017A bez wiadomo\u015Bci Chat Completions.");
+  }
+}
+async function notFoundError(response) {
+  var _a, _b, _c, _d;
+  const html = "HTTP 404 \xB7 HTML. Serwer zwr\xF3ci\u0142 stron\u0119 WWW.";
+  const generic = "HTTP 404 \xB7 serwer nie poda\u0142 rozpoznanej przyczyny.";
+  const media = (_b = (_a = response.headers["content-type"]) == null ? void 0 : _a.split(";")[0].trim().toLowerCase()) != null ? _b : "";
+  if (media === "text/html" || media === "application/xhtml+xml") {
+    response.destroy();
+    return new Error(html);
+  }
+  const parts = [];
+  let size = 0;
+  try {
+    for await (const chunk of response) {
+      const part = Buffer.from(chunk).subarray(0, maxErrorBytes - size);
+      parts.push(part);
+      size += part.length;
+      if (size === maxErrorBytes) break;
+    }
+  } catch (e) {
+  }
+  const body = Buffer.concat(parts).toString("utf8").trim();
+  if (/^(?:<!doctype\s+html|<html\b)/i.test(body)) return new Error(html);
+  let data;
+  try {
+    data = JSON.parse(body);
+  } catch (e) {
+    return new Error(generic);
+  }
+  const error = (_c = data == null ? void 0 : data.error) != null ? _c : data;
+  const code = [error == null ? void 0 : error.code, error == null ? void 0 : error.type].filter((value) => typeof value === "string").join(" ");
+  const message = typeof error === "string" ? error : (_d = error == null ? void 0 : error.message) != null ? _d : data == null ? void 0 : data.detail;
+  if (/\b(?:invalid_api_key|invalid_token|authentication_error|permission_denied)\b/i.test(code))
+    return new Error("HTTP 404 \xB7 JSON. Serwer wskaza\u0142 klucz lub uprawnienia.");
+  if (/\b(?:model_not_found|modelnotfound(?:error)?|deploymentnotfound)\b/i.test(code) || typeof message === "string" && /\bmodel\b[^\n]{0,200}\b(?:not found|does not exist)\b/i.test(message))
+    return new Error("HTTP 404 \xB7 JSON. Serwer zg\u0142osi\u0142 niedost\u0119pny model.");
+  return new Error("HTTP 404 \xB7 JSON. Serwer zwr\xF3ci\u0142 b\u0142\u0105d dla tego \u017C\u0105dania.");
+}
+async function postChat(url, secret, payload, signal, readSecret) {
+  var _a;
+  const headers = { "Content-Type": "application/json" };
+  if (signal.aborted) throw new Error("Anulowano \u017C\u0105danie.");
+  if (secret) {
+    let key;
+    try {
+      key = (_a = readSecret == null ? void 0 : readSecret(secret)) == null ? void 0 : _a.trim().replace(/^Bearer[ \t]+/i, "");
+    } catch (e) {
+      throw new Error("Nie uda\u0142o si\u0119 odczyta\u0107 klucza z magazynu sekret\xF3w Obsidiana.");
+    }
+    if (!key || !/^[\x21-\x7e]+$/.test(key)) {
+      throw new Error("Sprawd\u017A warto\u015B\u0107 klucza API w magazynie sekret\xF3w Obsidiana.");
+    }
+    headers.Authorization = "Bearer " + key;
+  }
   headers["Content-Length"] = Buffer.byteLength(payload);
   const transport = url.protocol === "https:" ? import_node_https.request : import_node_http.request;
   const ca = secret && typeof import_node_tls.getCACertificates === "function" ? [.../* @__PURE__ */ new Set([...(0, import_node_tls.getCACertificates)("default"), ...(0, import_node_tls.getCACertificates)("system")])] : void 0;
-  const raw = await new Promise((resolve, reject) => {
+  return new Promise((resolve, reject) => {
     const req = transport(url, {
       method: "POST",
       agent: false,
@@ -175,12 +238,15 @@ async function suggestBranches(settings, card, neighbours, signal, readSecret) {
       rejectUnauthorized: true
     }, (res) => {
       var _a2, _b;
+      if (res.statusCode === 404) {
+        void notFoundError(res).then(reject, () => reject(new Error("HTTP 404.")));
+        return;
+      }
       if (res.statusCode !== 200) {
         res.destroy();
         const hints = {
           401: "Sprawd\u017A warto\u015B\u0107 i wa\u017Cno\u015B\u0107 klucza API.",
-          403: "Sprawd\u017A uprawnienia klucza do wybranego modelu.",
-          404: "Por\xF3wnaj adres API i nazw\u0119 modelu z instrukcj\u0105 serwera."
+          403: "Sprawd\u017A uprawnienia klucza do wybranego modelu."
         };
         const status = (_a2 = res.statusCode) != null ? _a2 : 0;
         const hint = status >= 300 && status < 400 ? "Wpisz docelowy adres API. Przekierowania s\u0105 wy\u0142\u0105czone." : (_b = hints[status]) != null ? _b : "Sprawd\u017A adres, nazw\u0119 modelu i dost\u0119pno\u015B\u0107 us\u0142ugi.";
@@ -213,7 +279,6 @@ async function suggestBranches(settings, card, neighbours, signal, readSecret) {
     });
     req.end(payload);
   });
-  return readSuggestions(raw, [card, ...neighbours]);
 }
 
 // src/branch-modal.ts
@@ -406,7 +471,16 @@ var QwenSettingsTab = class extends import_obsidian2.PluginSettingTab {
     super(app, plugin);
     this.plugin = plugin;
   }
+  resetChatTest() {
+    var _a;
+    (_a = this.clearTest) == null ? void 0 : _a.call(this);
+  }
+  hide() {
+    this.resetChatTest();
+    this.clearTest = void 0;
+  }
   display() {
+    this.hide();
     this.containerEl.empty();
     const settings = this.plugin.settings;
     const server = settings.mode === "server";
@@ -457,6 +531,38 @@ var QwenSettingsTab = class extends import_obsidian2.PluginSettingTab {
       field.inputEl.addEventListener("change", () => updateAddress(field.getValue(), true));
     });
     updateAddress(settings.baseUrl, false);
+    if (server) this.addChatTest();
+  }
+  addChatTest() {
+    const row = new import_obsidian2.Setting(this.containerEl).setName("Test czatu").setDesc("Wysy\u0142a wy\u0142\u0105cznie tekst \u201EOdpowiedz tylko OK.\u201D do wybranego modelu, z u\u017Cyciem wybranego sekretu.");
+    const status = this.containerEl.createDiv({ attr: { role: "status", "aria-live": "polite" } });
+    let pending;
+    row.addButton((button) => {
+      this.clearTest = () => {
+        pending == null ? void 0 : pending.abort();
+        pending = void 0;
+        status.empty();
+        button.setDisabled(false);
+      };
+      button.setButtonText("Sprawd\u017A czat").onClick(async () => {
+        if (pending) return;
+        const controller = new AbortController();
+        pending = controller;
+        button.setDisabled(true);
+        status.setText("Oczekiwanie na odpowied\u017A czatu\u2026");
+        try {
+          await testChat(this.plugin.settings, controller.signal, (name) => this.app.secretStorage.getSecret(name));
+          if (!controller.signal.aborted) status.setText("CZAT OK \xB7 HTTP 200.");
+        } catch (error) {
+          if (!controller.signal.aborted) status.setText(error.message);
+        } finally {
+          if (pending === controller) {
+            pending = void 0;
+            button.setDisabled(false);
+          }
+        }
+      });
+    });
   }
 };
 
@@ -476,15 +582,17 @@ var CanvasQwenPlugin = class extends import_obsidian3.Plugin {
       mode: (data == null ? void 0 : data.mode) === "server" ? "server" : "local",
       credential: typeof ((_a = data == null ? void 0 : data.credential) == null ? void 0 : _a.name) === "string" && typeof data.credential.endpoint === "string" ? { name: data.credential.name, endpoint: data.credential.endpoint } : null
     };
-    this.addSettingTab(new QwenSettingsTab(this.app, this));
+    this.preferences = new QwenSettingsTab(this.app, this);
+    this.addSettingTab(this.preferences);
     this.registerEvent(this.app.workspace.on("canvas:node-menu", (menu, node) => {
       if (!isCanvasCard(node) || !textCard(node.canvas.getData(), node.id)) return;
       menu.addItem((item) => item.setTitle("Rozwi\u0144 ga\u0142\u0105\u017A z Qwenem").setIcon("git-fork").onClick(() => this.openBranches(node)));
     }));
   }
   updateSettings(changes) {
-    var _a;
-    (_a = this.modal) == null ? void 0 : _a.close();
+    var _a, _b;
+    (_a = this.preferences) == null ? void 0 : _a.resetChatTest();
+    (_b = this.modal) == null ? void 0 : _b.close();
     this.settings = { ...this.settings, ...changes };
     const snapshot = this.settings;
     this.pendingSave = this.pendingSave.then(() => this.saveData(snapshot)).catch(() => {
@@ -522,7 +630,8 @@ var CanvasQwenPlugin = class extends import_obsidian3.Plugin {
     this.modal.open();
   }
   onunload() {
-    var _a;
-    (_a = this.modal) == null ? void 0 : _a.close();
+    var _a, _b;
+    (_a = this.preferences) == null ? void 0 : _a.hide();
+    (_b = this.modal) == null ? void 0 : _b.close();
   }
 };

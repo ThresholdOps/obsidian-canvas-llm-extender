@@ -7,6 +7,7 @@ import { defaultSettings, QwenSettingsTab } from "./settings";
 export default class CanvasQwenPlugin extends Plugin {
     settings: QwenSettings = { ...defaultSettings };
     private modal?: BranchModal;
+    private preferences?: QwenSettingsTab;
     private pendingSave = Promise.resolve();
 
     async onload(): Promise<void> {
@@ -18,7 +19,8 @@ export default class CanvasQwenPlugin extends Plugin {
             credential: typeof data?.credential?.name === "string" && typeof data.credential.endpoint === "string"
                 ? { name: data.credential.name, endpoint: data.credential.endpoint } : null,
         };
-        this.addSettingTab(new QwenSettingsTab(this.app, this));
+        this.preferences = new QwenSettingsTab(this.app, this);
+        this.addSettingTab(this.preferences);
         this.registerEvent(this.app.workspace.on("canvas:node-menu", (menu, node: unknown) => {
             if (!isCanvasCard(node) || !textCard(node.canvas.getData(), node.id)) return;
             menu.addItem(item => item.setTitle("Rozwiń gałąź z Qwenem").setIcon("git-fork")
@@ -27,6 +29,7 @@ export default class CanvasQwenPlugin extends Plugin {
     }
 
     updateSettings(changes: Partial<QwenSettings>): Promise<void> {
+        this.preferences?.resetChatTest();
         this.modal?.close();
         this.settings = { ...this.settings, ...changes };
         const snapshot = this.settings;
@@ -59,6 +62,7 @@ export default class CanvasQwenPlugin extends Plugin {
     }
 
     onunload(): void {
+        this.preferences?.hide();
         this.modal?.close();
     }
 }

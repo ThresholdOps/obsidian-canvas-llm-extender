@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { serverEndpoint, suggestBranches } from "../../src/local-qwen.ts";
+import { serverEndpoint, suggestBranches, testChat } from "../../src/local-qwen.ts";
 
 const baseUrl=process.argv[2];
 const settings={baseUrl,mode:"server",model:"demo",credential:{name:"test-key",endpoint:serverEndpoint(baseUrl).href}};
@@ -17,3 +17,23 @@ for(const code of [401,403,404,307]) {
         return true;
     });
 }
+
+const checkChat = (model, extra = {}) => testChat({...settings,model,...extra},new AbortController().signal,getSecret);
+await checkChat("chat-ok");
+for (const [model, expected] of [
+    ["missing-model", /404 · JSON.*model/],
+    ["key-error", /404 · JSON.*klucz/],
+    ["unknown-resource", /404 · JSON/],
+    ["proxy-page", /404 · HTML/],
+    ["long-error", /404.*przyczyny/],
+    ["unexpected-200", /200.*bez wiadomości/],
+    ["redirect-chat", /307/],
+]) {
+    await assert.rejects(checkChat(model), error => {
+        assert.match(error.message, expected);
+        assert.equal(error.message.includes(process.env.CANVAS_TEST_TOKEN), false);
+        return true;
+    });
+}
+await assert.rejects(checkChat("invalid",{mode:"local"}), /tryb serwera/);
+await assert.rejects(checkChat("invalid",{credential:null}), /wybierz klucz/);

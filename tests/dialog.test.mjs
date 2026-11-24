@@ -113,6 +113,28 @@ if (process.env.CANVAS_QWEN_TEST_MODEL) {
     if (gateway) connections.push({name:"authenticated HTTPS", settings:{
         mode:"server",baseUrl:gateway,model,credential:{name:"integration",endpoint:gateway+"/chat/completions"},
     }});
+    if (gateway) test("the settings button checks a real HTTPS chat once with the already selected secret", async t => {
+        let reads=0;
+        const app={settings:connections[1].settings,workspace:{on(){}},secretStorage:{
+            getSecret(name){assert.equal(name,"integration"); reads++; return process.env.CANVAS_QWEN_TEST_BEARER;},
+        }};
+        const plugin=new Plugin(app);
+        await plugin.onload();
+        t.after(()=>plugin.onunload());
+        const tab=app.settingsTab;
+        tab.display();
+        assert.equal(reads,0);
+        const button=[...tab.containerEl.querySelectorAll("button")].find(el=>el.textContent==="Sprawdź czat");
+        const first=button.onclick();
+        assert.equal(button.disabled,true);
+        await button.onclick();
+        await first;
+        assert.equal(reads,1);
+        assert.match(tab.containerEl.textContent,/CZAT OK · HTTP 200/);
+        assert.equal(button.disabled,false);
+        await plugin.updateSettings({model:"other-model"});
+        assert.doesNotMatch(tab.containerEl.textContent,/CZAT OK/);
+    });
     for (const {name,settings} of connections) test(`plugin bundle expands a single card with a real model over ${name}`, async t => {
         const ui = await dialog(t,settings,false,{ getSecret:id => id==="integration" ? process.env.CANVAS_QWEN_TEST_BEARER : null });
         await button("Zaproponuj").onclick();
@@ -176,4 +198,31 @@ test("a missing server token fails on Generate before any request and leaves the
     assert.deepEqual(lookups,["qwen-token"]);
     assert.match(document.querySelector('[role="status"]').textContent,/magazynie sekretów/);
     assert.equal(ui.saves(),0);
+});
+
+test("the chat test uses the saved secret only on click and drops stale results when settings close or change", async () => {
+    const baseUrl="https://example.org/v1";
+    const settings={baseUrl,mode:"server",model:"example",credential:{name:"test-key",endpoint:baseUrl+"/chat/completions"}};
+    let reads=0;
+    const app={settings,workspace:{on(){}},secretStorage:{getSecret(){reads++; return null;}}};
+    const plugin=new Plugin(app);
+    await plugin.onload();
+    const tab=app.settingsTab;
+    tab.display();
+    const check=[...tab.containerEl.querySelectorAll("button")].find(el=>el.textContent==="Sprawdź czat");
+    assert.equal(reads,0);
+    const failed=check.onclick();
+    await check.onclick();
+    await failed;
+    assert.equal(reads,1);
+    assert.match(tab.containerEl.textContent,/wartość klucza API/);
+    const obsolete=check.onclick();
+    await plugin.updateSettings({model:"changed"});
+    await obsolete;
+    assert.doesNotMatch(tab.containerEl.textContent,/wartość klucza API|Oczekiwanie/);
+    const hidden=check.onclick();
+    tab.hide();
+    await hidden;
+    assert.doesNotMatch(tab.containerEl.textContent,/wartość klucza API|Oczekiwanie/);
+    plugin.onunload();
 });
